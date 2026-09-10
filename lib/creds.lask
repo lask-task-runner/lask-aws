@@ -1,0 +1,31 @@
+// Internal helper for injecting AWS credentials into a single command's
+// execution environment.
+//
+// Lask forwards no ambient host environment variables into `#docker(...)`
+// environments (spec 10.6) — only an explicit per-command override reaches
+// the container, written as a leading `NAME='value'` shell assignment in
+// the command string itself. This is the only way for a caller to hand
+// ephemeral or per-call credentials (e.g. assumed-role output in CI) to a
+// containerized aws-cli.
+//
+// All three inputs default to "" (see main.lask): a call with no
+// credentials given makes no override at all, so ambient credentials
+// already present in the target --env (an instance role, a mounted AWS
+// profile, ~/.aws/credentials on #local, ...) apply unchanged. This
+// mirrors lask-terraform's stance of never requiring secrets through
+// arguments, while still allowing an explicit override when one is needed.
+
+import { quote, join_args } from "./args.lask"
+
+// Returns "NAME='value'", or "" when value is empty.
+env_assign(name: String, value: String): String =
+  if (value == "") { "" } else { "#{name}=#{quote(value)}" }
+
+// Builds the full credential prefix from the three AWS_* variables, or ""
+// when none are given.
+credential_env(access_key_id: String, secret_access_key: String, session_token: String): String =
+  join_args([
+    env_assign("AWS_ACCESS_KEY_ID", access_key_id),
+    env_assign("AWS_SECRET_ACCESS_KEY", secret_access_key),
+    env_assign("AWS_SESSION_TOKEN", session_token)
+  ])

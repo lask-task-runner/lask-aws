@@ -1,0 +1,71 @@
+// Example consumer tasks for lask-aws, mirroring the hand-rolled aws-cli
+// calls in lask/example/04-webapp/main.lask (s3 sync, cloudfront
+// create-invalidation, cognito-idp admin-create-user /
+// admin-set-user-password) — before this module existed, each of those
+// calls repeated the same three-line credential prefix inline.
+//
+// A real consumer project declares the dependency once:
+//   lask deps add aws --git https://github.com/lask-task-runner/lask-aws --rev v0.1.0
+// and imports it by name:
+//   import * as aws from "aws"
+// Inside this repository the module is imported by relative path instead.
+
+import * as aws from "../main.lask"
+
+// Publishes a built frontend to S3 and invalidates the cached index.html
+// so the new build is served immediately instead of the previous one.
+publish_web(
+  bucket: String,
+  distribution_id: String,
+  --dist_dir: String = "web/dist",
+  --region: String = get_env("AWS_DEFAULT_REGION"),
+  --access_key_id: String = get_env("AWS_ACCESS_KEY_ID"),
+  --secret_access_key!!: String = get_env("AWS_SECRET_ACCESS_KEY")
+): String = do {
+  aws.s3_sync(
+    dist_dir, "s3://#{bucket}", delete = true,
+    region = region, access_key_id = access_key_id, secret_access_key = secret_access_key
+  )
+  inv = aws.cloudfront_create_invalidation(
+    distribution_id, ["/index.html"],
+    region = region, access_key_id = access_key_id, secret_access_key = secret_access_key
+  )
+  inv.id
+}
+
+// Creates a Cognito sign-in user with a permanent password (self sign-up
+// disabled, so this is the only way to add one) — the two-call sequence
+// example/04-webapp used to write out by hand.
+create_user(
+  user_pool_id: String,
+  email: String,
+  password!!: String,
+  --region: String = get_env("AWS_DEFAULT_REGION"),
+  --access_key_id: String = get_env("AWS_ACCESS_KEY_ID"),
+  --secret_access_key!!: String = get_env("AWS_SECRET_ACCESS_KEY")
+): String = do {
+  aws.cognito_idp_admin_create_user(
+    user_pool_id, email,
+    user_attributes = {email: email, email_verified: "true"},
+    message_action = "SUPPRESS",
+    region = region, access_key_id = access_key_id, secret_access_key = secret_access_key
+  )
+  aws.cognito_idp_admin_set_user_password(
+    user_pool_id, email, password, permanent = true,
+    region = region, access_key_id = access_key_id, secret_access_key = secret_access_key
+  )
+  "created"
+}
+
+// Confirms which AWS identity a deploy would run as, before it runs
+// anything real.
+whoami(
+  --region: String = get_env("AWS_DEFAULT_REGION"),
+  --access_key_id: String = get_env("AWS_ACCESS_KEY_ID"),
+  --secret_access_key!!: String = get_env("AWS_SECRET_ACCESS_KEY")
+): String = do {
+  id = aws.sts_get_caller_identity(
+    region = region, access_key_id = access_key_id, secret_access_key = secret_access_key
+  )
+  "#{id.account}:#{id.arn}"
+}

@@ -1,0 +1,21 @@
+// Internal command runner. Builds the final `aws` invocation from a
+// credential prefix (lib/creds.lask) and an argument tail (lib/args.lask),
+// and executes it in the given environment. Effectful; kept separate from
+// the pure argument builders.
+
+// Runs `aws <tail>`, prefixed with `creds` (see credential_env) when
+// non-empty. Fails on a non-zero exit with Error(code, stderr), same as
+// the command sugar `$`.
+run_aws(tail: String, creds: String, env: Environment): String = do {
+  prefix = if (creds == "") { "" } else { concat(creds, " ") }
+  $[env] #{prefix}aws #{tail}
+}
+
+// Same as run_aws, but never fails on a non-zero exit: returns the full
+// CommandResult so a caller can treat an aws-cli exit code as data instead
+// of a failure. Used by the cli() escape hatch, where the wrapped
+// subcommand is not known ahead of time.
+run_aws_raw(tail: String, creds: String, env: Environment): CommandResult = do {
+  prefix = if (creds == "") { "" } else { concat(creds, " ") }
+  $*[env] #{prefix}aws #{tail}
+}

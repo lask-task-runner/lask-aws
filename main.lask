@@ -1,0 +1,367 @@
+// lask-aws — AWS CLI wrapper for Lask.
+//
+// Public API of the module (this file is the bare-name entry point).
+// Design rationale: doc/design.md. Usage: README.md.
+//
+// Function and option names mirror the aws-cli service/subcommand/option
+// they wrap, in snake_case (e.g. `--user-pool-id` -> `user_pool_id`,
+// `admin-create-user` -> `admin_create_user`), so a reader who already
+// knows aws-cli recognizes the call. The one deliberate exception is
+// credentials: aws-cli has no `--access-key-id`/`--secret-access-key`
+// flags at all (by its own design), so these are named after the AWS_*
+// environment variables they set instead (see doc/design.md §5).
+//
+// Common keyword parameters on every command function:
+//   --region              forwarded as aws-cli's own --region
+//   --profile             forwarded as aws-cli's own --profile
+//   --endpoint_url        forwarded as aws-cli's own --endpoint-url
+//   --access_key_id       sets AWS_ACCESS_KEY_ID for this command only
+//   --secret_access_key   sets AWS_SECRET_ACCESS_KEY for this command only
+//   --session_token       sets AWS_SESSION_TOKEN for this command only
+//   --env                 execution environment (spec ch. 10); defaults to
+//                         #docker("amazon/aws-cli:2.36.41")
+//
+// All three credential parameters default to "": omitted, they add no
+// override and ambient credentials of the target --env apply unchanged.
+// See doc/design.md §5 for why the module accepts them at all despite
+// lask-terraform's "no secrets through arguments" precedent.
+
+import { quote, flag, opt, repeated_opt, multi_opt, global_opts, join_args } from "./lib/args.lask"
+import { credential_env } from "./lib/creds.lask"
+import { run_aws, run_aws_raw } from "./lib/exec.lask"
+
+default_env = #docker("amazon/aws-cli:2.36.41")
+
+// Result of `sts get-caller-identity`.
+type StsIdentity = Record<user_id: String, account: String, arn: String>
+
+// Result of `cloudfront create-invalidation` (only the fields consumers
+// actually poll on; the full response is far larger).
+type CfInvalidation = Record<id: String, status: String>
+
+// Cast helpers for decoding aws-cli's `--output json`. They are public by
+// necessity: `cast` needs its target type concretized from the expected
+// type at the reference position (spec 4.4, 15.8), a plain `BindStmt`
+// inside `do` carries no type annotation of its own (spec 6.5), and
+// main.lask cannot hide top-level declarations — so a function signature
+// is the only typed position available (same reasoning as
+// lask-terraform's decode_outputs/output_entry).
+as_map(v: Any): Map<Any> = cast(v)
+as_string(v: Any): String = cast(v)
+
+// `aws --version` prints to stdout on some builds and stderr on others;
+// this returns whichever stream was non-empty.
+version(--env: Environment = default_env): String = do {
+  r = $*[env] aws --version
+  if (r.stdout != "") { r.stdout } else { r.stderr }
+}
+
+// `sts get-caller-identity`: identifies which credentials are in effect.
+// Useful as a pre-flight check before a deploy task runs anything real.
+sts_get_caller_identity(
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): StsIdentity = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  raw = run_aws("sts get-caller-identity --output json #{g}", creds, env)
+  m = as_map(from_json(raw))
+  uid = as_string(get(m, "UserId"))
+  acct = as_string(get(m, "Account"))
+  arn = as_string(get(m, "Arn"))
+  { user_id: uid, account: acct, arn: arn }
+}
+
+// `s3 sync <source> <destination>`.
+s3_sync(
+  source: String,
+  destination: String,
+  --delete: Bool = false,
+  --dryrun: Bool = false,
+  --acl: String = "",
+  --exclude: Array<String> = [],
+  --include: Array<String> = [],
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): String = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  a = join_args([
+    flag(delete, "delete"),
+    flag(dryrun, "dryrun"),
+    opt("acl", acl),
+    repeated_opt("exclude", exclude),
+    repeated_opt("include", include)
+  ])
+  run_aws("s3 sync #{quote(source)} #{quote(destination)} #{a} #{g}", creds, env)
+}
+
+// `s3 cp <source> <destination>`.
+s3_cp(
+  source: String,
+  destination: String,
+  --recursive: Bool = false,
+  --dryrun: Bool = false,
+  --acl: String = "",
+  --exclude: Array<String> = [],
+  --include: Array<String> = [],
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): String = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  a = join_args([
+    flag(recursive, "recursive"),
+    flag(dryrun, "dryrun"),
+    opt("acl", acl),
+    repeated_opt("exclude", exclude),
+    repeated_opt("include", include)
+  ])
+  run_aws("s3 cp #{quote(source)} #{quote(destination)} #{a} #{g}", creds, env)
+}
+
+// `s3 rm <target>`.
+s3_rm(
+  target: String,
+  --recursive: Bool = false,
+  --dryrun: Bool = false,
+  --exclude: Array<String> = [],
+  --include: Array<String> = [],
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): String = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  a = join_args([
+    flag(recursive, "recursive"),
+    flag(dryrun, "dryrun"),
+    repeated_opt("exclude", exclude),
+    repeated_opt("include", include)
+  ])
+  run_aws("s3 rm #{quote(target)} #{a} #{g}", creds, env)
+}
+
+// `s3 ls [<path>]`; stdout split into non-empty lines. Omit --path to list
+// buckets, matching aws-cli's own behavior for a bare `s3 ls`.
+s3_ls(
+  --path: String = "",
+  --recursive: Bool = false,
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): Array<String> = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  p = if (path == "") { "" } else { quote(path) }
+  a = join_args([p, flag(recursive, "recursive")])
+  out = run_aws("s3 ls #{a} #{g}", creds, env)
+  filter(split(trim(out), "\n"), \(s: String) -> s != "")
+}
+
+// `cloudfront create-invalidation --distribution-id <id> --paths <paths>...`.
+cloudfront_create_invalidation(
+  distribution_id: String,
+  paths: Array<String>,
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): CfInvalidation = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  p = multi_opt("paths", paths)
+  raw = run_aws(
+    "cloudfront create-invalidation --distribution-id #{quote(distribution_id)} #{p} --output json #{g}",
+    creds, env
+  )
+  root = as_map(from_json(raw))
+  inv = as_map(get(root, "Invalidation"))
+  id = as_string(get(inv, "Id"))
+  status = as_string(get(inv, "Status"))
+  { id: id, status: status }
+}
+
+// Encodes `--user-attributes` as aws-cli expects: `Name=k,Value=v` per
+// entry, space-separated after a single flag.
+attrs_arg(attrs: Map<String>): String = do {
+  ks = keys(attrs)
+  pairs = map(ks, \(k: String) -> "Name=#{k},Value=#{get(attrs, k)}")
+  multi_opt("user-attributes", pairs)
+}
+
+// `cognito-idp admin-create-user --user-pool-id <id> --username <name>`.
+// Returns the raw aws-cli output (JSON by default) describing the created
+// user; pass --message_action "SUPPRESS" to skip the welcome email/SMS
+// (self-service sign-up disabled pools typically want this).
+cognito_idp_admin_create_user(
+  user_pool_id: String,
+  username: String,
+  --user_attributes: Map<String> = {},
+  --message_action: String = "",
+  --temporary_password!!: String = "",
+  --desired_delivery_mediums: Array<String> = [],
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): String = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  a = join_args([
+    attrs_arg(user_attributes),
+    opt("message-action", message_action),
+    opt("temporary-password", temporary_password),
+    multi_opt("desired-delivery-mediums", desired_delivery_mediums)
+  ])
+  run_aws(
+    "cognito-idp admin-create-user --user-pool-id #{quote(user_pool_id)} --username #{quote(username)} #{a} #{g}",
+    creds, env
+  )
+}
+
+// `cognito-idp admin-set-user-password --user-pool-id <id> --username <name> --password <pw>`.
+// --permanent defaults to true: a temporary password left temporary just
+// forces the same sign-in flow this function is usually called to skip.
+cognito_idp_admin_set_user_password(
+  user_pool_id: String,
+  username: String,
+  password!!: String,
+  --permanent: Bool = true,
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): String = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  a = join_args([opt("password", password), flag(permanent, "permanent")])
+  run_aws(
+    "cognito-idp admin-set-user-password --user-pool-id #{quote(user_pool_id)} --username #{quote(username)} #{a} #{g}",
+    creds, env
+  )
+}
+
+// `cognito-idp admin-delete-user --user-pool-id <id> --username <name>`.
+cognito_idp_admin_delete_user(
+  user_pool_id: String,
+  username: String,
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): String = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  run_aws(
+    "cognito-idp admin-delete-user --user-pool-id #{quote(user_pool_id)} --username #{quote(username)} #{g}",
+    creds, env
+  )
+}
+
+// `secretsmanager get-secret-value --secret-id <id>`; returns SecretString
+// only. The returned value is marked secret (spec 6.10) even when the
+// caller does not bind it with `!!`, so it is masked from logs regardless.
+secretsmanager_get_secret_value(
+  secret_id: String,
+  --version_id: String = "",
+  --version_stage: String = "",
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): String = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  a = join_args([opt("version-id", version_id), opt("version-stage", version_stage)])
+  raw = run_aws("secretsmanager get-secret-value --secret-id #{quote(secret_id)} #{a} --output json #{g}", creds, env)
+  m = as_map(from_json(raw))
+  if (!has_key(m, "SecretString")) {
+    return fail(error(3, concat("secretsmanager get-secret-value: no SecretString for ", secret_id)))
+  }
+  v!! = as_string(get(m, "SecretString"))
+  v
+}
+
+// `ssm get-parameter --name <name> [--with-decryption]`; returns Value
+// only. --with_decryption defaults to true (SecureString is the common
+// case for a value worth fetching at deploy time); the returned value is
+// marked secret regardless of the parameter's actual type.
+ssm_get_parameter(
+  name: String,
+  --with_decryption: Bool = true,
+  --region: String = "",
+  --profile: String = "",
+  --endpoint_url: String = "",
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): String = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  g = global_opts(region, profile, endpoint_url)
+  wd = flag(with_decryption, "with-decryption")
+  raw = run_aws("ssm get-parameter --name #{quote(name)} #{wd} --output json #{g}", creds, env)
+  m = as_map(from_json(raw))
+  p = as_map(get(m, "Parameter"))
+  v!! = as_string(get(p, "Value"))
+  v
+}
+
+// Escape hatch for any aws-cli subcommand this module does not wrap
+// directly: quotes and joins args exactly as given, executes
+// `aws <args...>`, and returns the full CommandResult without failing on
+// a non-zero exit — the one place in this module where an aws-cli exit
+// code is left for the caller to interpret as data, since an unwrapped
+// subcommand's exit-code conventions are not known here. Pass global
+// options as ordinary elements of args, e.g. cli("s3api", "head-object",
+// "--bucket", bucket, "--key", key).
+cli(
+  ...args: Array<String>,
+  --access_key_id: String = "",
+  --secret_access_key!!: String = "",
+  --session_token!!: String = "",
+  --env: Environment = default_env
+): CommandResult = do {
+  creds = credential_env(access_key_id, secret_access_key, session_token)
+  tail = join(map(args, quote), " ")
+  run_aws_raw(tail, creds, env)
+}

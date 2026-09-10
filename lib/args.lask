@@ -1,0 +1,48 @@
+// Internal helpers for assembling aws-cli argument strings (`--long-name
+// 'value'` style, matching aws-cli's own long-option convention). Pure
+// functions only; no command execution here.
+
+// Shell-quotes a value: wraps it in single quotes and escapes embedded
+// single quotes, so a value containing spaces or other shell-special
+// characters survives substitution into a command string (spec 6.6 does
+// not escape interpolated values on its own).
+quote(s: String): String = concat("'", concat(replace(s, "'", "'\\''"), "'"))
+
+// Returns "--name" when cond holds, otherwise "" (dropped by join_args).
+flag(cond: Bool, name: String): String = if (cond) { concat("--", name) } else { "" }
+
+// Returns "--name 'value'", or "" when value is empty.
+opt(name: String, value: String): String =
+  if (value == "") { "" } else { "--#{name} #{quote(value)}" }
+
+// Repeats a flag once per element — aws-cli's convention for options like
+// `s3 sync --exclude` that accept one pattern per occurrence.
+//   repeated_opt("exclude", ["*.tmp", "*.log"]) == "--exclude '*.tmp' --exclude '*.log'"
+repeated_opt(name: String, values: Array<String>): String =
+  join_args(map(values, \(v: String) -> opt(name, v)))
+
+// One flag followed by every value — aws-cli's convention for options like
+// `cloudfront create-invalidation --paths` that accept a list after a
+// single occurrence of the flag.
+//   multi_opt("paths", ["/a", "/b"]) == "--paths '/a' '/b'"
+multi_opt(name: String, values: Array<String>): String =
+  if (count(values) == 0) { "" } else { "--#{name} #{join_args(map(values, quote))}" }
+
+// The `--region`/`--profile`/`--endpoint-url` triple every aws-cli
+// invocation accepts. `--endpoint-url` is mainly for pointing at a
+// non-AWS-hosted endpoint (LocalStack, a S3-compatible store, a VPC
+// endpoint) rather than everyday use.
+global_opts(region: String, profile: String, endpoint_url: String): String =
+  join_args([opt("region", region), opt("profile", profile), opt("endpoint-url", endpoint_url)])
+
+// True when needle occurs anywhere in s (there is no built-in substring
+// search; length-preservation after replace() stands in for one).
+contains(s: String, needle: String): Bool = replace(s, needle, "") != s
+
+// Joins the non-empty parts with single spaces.
+join_args(parts: Array<String>): String =
+  join(filter(parts, \(s: String) -> s != ""), " ")
+
+// Number of elements (the built-in length is String-only).
+count(xs: Array<String>): Number =
+  reduce(xs, 0, \(acc: Number, x: String) -> acc + 1)

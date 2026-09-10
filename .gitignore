@@ -1,0 +1,2 @@
+# Generated when running/checking a sub-module directly (e.g. test/selftest.lask)
+test/lask.lock.json

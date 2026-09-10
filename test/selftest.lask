@@ -1,0 +1,147 @@
+// Self-test for lask-aws.
+//
+// Requires Docker only (no host aws-cli): start_localstack()/
+// stop_localstack() below manage the LocalStack container with plain shell
+// commands in the default #local environment, while every actual aws-cli
+// call goes through this module's own functions in their default
+// environment (#docker("amazon/aws-cli:2.36.41")) — the same containerized
+// path a real consumer uses.
+//
+// The container reaches LocalStack, which listens on the *host's*
+// localhost, via the special hostname `host.docker.internal` (spec 10.2
+// exposes no host-networking construction parameter, so this — not an
+// in-language feature — is what makes the container able to reach out to
+// the host at all). Verified with Docker Desktop/Rancher Desktop on macOS;
+// on a Linux Docker Engine host without that hostname pre-wired, point
+// `endpoint` at the runner's docker0/bridge gateway address instead.
+//
+//   lask run --module test/selftest.lask all
+//
+// Exercises S3, STS, Secrets Manager, and SSM against LocalStack (free,
+// community edition). CloudFront and Cognito Identity Provider are
+// LocalStack Pro-only and are NOT covered here — see doc/design.md §10 for
+// how those are validated instead (static check + real-account usage in
+// lask/example/04-webapp).
+//
+// Commands run with this module's directory (test/) as cwd (spec 10.5), so
+// the fixture file below is written to a path relative to it.
+
+import * as aws from "../main.lask"
+import { contains, count } from "../lib/args.lask"
+
+endpoint = "http://host.docker.internal:4566"
+container_name = "lask-aws-selftest-localstack"
+bucket = "lask-aws-selftest"
+fixture_file = "work/hello.txt"
+
+expect(cond: Bool, msg: String): String =
+  if (cond) { "ok" } else { fail(error(1, msg)) }
+
+start_localstack(): String = do {
+  $* docker rm -f #{container_name}
+  $ docker run -d --name #{container_name} -p 4566:4566 localstack/localstack:3.8.1
+  // LocalStack takes a few seconds to become ready; there is no polling
+  // primitive in the language, so a fixed wait stands in for one.
+  $* sleep 8
+  "started"
+}
+
+stop_localstack(): String = do {
+  $* rm -rf work
+  $* docker rm -f #{container_name}
+  "stopped"
+}
+
+all(): String = try {
+  start_localstack()
+  run_checks()
+} finally {
+  stop_localstack()
+}
+
+run_checks(): String = do {
+  id = aws.sts_get_caller_identity(
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  expect(id.account != "", "sts_get_caller_identity should return a non-empty account id")
+
+  // s3_mb has no dedicated wrapper (bucket creation is a one-time setup
+  // step, not a deploy-time operation), so cli() is the natural tool.
+  // --region is required here: with none given, aws-cli's `s3 mb` falls
+  // back to the pseudo-region "aws-global", which LocalStack rejects.
+  aws.cli(
+    "s3", "mb", "s3://#{bucket}", "--region", "us-east-1", "--endpoint-url", endpoint,
+    access_key_id = "test", secret_access_key = "test"
+  )
+
+  $* mkdir -p work
+  $ echo "hello-lask" > #{fixture_file}
+
+  aws.s3_sync(
+    "work", "s3://#{bucket}",
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  listed = aws.s3_ls(
+    path = "s3://#{bucket}",
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  expect(count(filter(listed, \(l: String) -> contains(l, "hello.txt"))) == 1,
+    "s3_ls should list the synced hello.txt")
+
+  aws.s3_cp(
+    "s3://#{bucket}/hello.txt", "s3://#{bucket}/copy.txt",
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  listed2 = aws.s3_ls(
+    path = "s3://#{bucket}",
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  expect(count(filter(listed2, \(l: String) -> contains(l, "copy.txt"))) == 1,
+    "s3_cp should have created copy.txt")
+
+  aws.s3_rm(
+    "s3://#{bucket}/copy.txt",
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  listed3 = aws.s3_ls(
+    path = "s3://#{bucket}",
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  expect(count(filter(listed3, \(l: String) -> contains(l, "copy.txt"))) == 0,
+    "s3_rm should have removed copy.txt")
+
+  // secretsmanager get-secret-value: create-secret has no dedicated
+  // wrapper (also a one-time setup step), so cli() creates the fixture.
+  aws.cli(
+    "secretsmanager", "create-secret", "--name", "lask-aws-selftest-secret",
+    "--secret-string", "s3cr3t", "--region", "us-east-1", "--endpoint-url", endpoint,
+    access_key_id = "test", secret_access_key = "test"
+  )
+  secret = aws.secretsmanager_get_secret_value(
+    "lask-aws-selftest-secret",
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  expect(secret == "s3cr3t", "secretsmanager_get_secret_value returned an unexpected value")
+
+  aws.cli(
+    "ssm", "put-parameter", "--name", "/lask-aws-selftest/param",
+    "--value", "param-value", "--type", "String", "--region", "us-east-1", "--endpoint-url", endpoint,
+    access_key_id = "test", secret_access_key = "test"
+  )
+  param = aws.ssm_get_parameter(
+    "/lask-aws-selftest/param", with_decryption = false,
+    endpoint_url = endpoint, region = "us-east-1",
+    access_key_id = "test", secret_access_key = "test"
+  )
+  expect(param == "param-value", "ssm_get_parameter returned an unexpected value")
+
+  "ok"
+}
