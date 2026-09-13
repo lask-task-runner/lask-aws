@@ -359,7 +359,9 @@ same reasoning as lask-terraform's `decode_outputs`/`output_entry`.
   account or credentials at all.
 - **Selftest**: `test/selftest.lask` starts
   [LocalStack](https://github.com/localstack/localstack) (community
-  edition) with a plain `docker run` in the default `#local` environment,
+  edition) with a plain `docker run` on the host, declared there as
+  `command "docker", ... on #local` (lask has no default execution
+  environment, so a command naming none is a static error),
   then exercises S3, STS, Secrets Manager, and SSM through this module's
   own functions in their normal `#docker("amazon/aws-cli:2.36.41")`
   environment — the same containerized path a real consumer uses, not a
