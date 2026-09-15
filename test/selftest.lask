@@ -2,7 +2,7 @@
 //
 // Requires Docker only (no host aws-cli): start_localstack()/
 // stop_localstack() below manage the LocalStack container with plain shell
-// commands in the default #local environment, while every actual aws-cli
+// commands declared to run on the host (#local), while every actual aws-cli
 // call goes through this module's own functions in their default
 // environment (#docker("amazon/aws-cli:2.36.41")) — the same containerized
 // path a real consumer uses.
@@ -28,6 +28,15 @@
 
 import * as aws from "../main.lask"
 import { contains, count } from "../lib/args.lask"
+
+// The programs this self-test runs on the host: the LocalStack
+// container is managed with the host's docker CLI, and the fixture is
+// written to the host's work/ directory. lask has no default execution
+// environment, so a command naming none is a static error rather than a
+// silent fall back to the host (lask spec 10.1) — every aws-cli call
+// still goes through this module's own functions, in their own
+// containerized environment.
+command "docker", "rm", "mkdir", "sleep", "echo" on #local
 
 endpoint = "http://host.docker.internal:4566"
 container_name = "lask-aws-selftest-localstack"
